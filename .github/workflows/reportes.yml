@@ -1,0 +1,418 @@
+name: CI con Snyk, SonarCloud, Semgrep, Mutant Testing, Allure y Playwright
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  snyk-analysis:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+            pip install -r proyecto/requirements.txt
+
+      - name: Install Snyk
+        run: npm install -g snyk
+
+      - name: Authenticate with Snyk
+        run: snyk auth ${{ secrets.SNYK_TOKEN }}
+
+      - name: Run Snyk test
+        run: snyk test --file=proyecto/requirements.txt
+
+      - name: Monitor project with Snyk
+        run: snyk monitor --file=proyecto/requirements.txt
+
+      - name: Install Snyk-to-HTML
+        run: npm install -g snyk-to-html
+
+      - name: Snyk Code test
+        run: snyk code test --sarif-file-output=snyk.sarif --json-file-output=snyk-report.json || echo "Snyk code test completed with issues"
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Verificar existencia del archivo SARIF
+        run: ls -la snyk.sarif
+
+      - name: Mover archivo SARIF a Reportes
+        run: |
+          mkdir -p ../Reportes  # Crea el directorio si no existe
+          mv snyk.sarif ../Reportes/  # Mueve el archivo SARIF a la carpeta Reportes
+
+      - name: Generar reporte HTML desde SARIF
+        run: snyk-to-html -i ../Reportes/snyk.sarif -o ../Reportes/snyk-report.html 
+
+      - name: Verificar existencia del reporte HTML
+        run: ls -la ../Reportes/snyk-report.html
+
+      - name: Snyk Open Source monitor
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: snyk monitor --file=proyecto/requirements.txt
+
+      - name: Upload result to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ../Reportes/snyk.sarif  
+
+      - name: Configurar Git para publicar en GitHub Pages
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+      - name: Publicar reporte en GitHub Pages
+        run: |
+          git fetch origin gh-pages  # Obtiene la última versión de la rama gh-pages
+          git checkout gh-pages  # Cambia a la rama gh-pages
+          cp ../Reportes/snyk-report.html reporte-snyk.html  # Cambia el nombre al copiar
+          git add reporte-snyk.html
+          git commit -m "Publicando reporte de Snyk como reporte-snyk.html" || echo "No hay cambios para commitear"  # Manejo de caso si no hay cambios
+          git push origin gh-pages  # Publica sin usar --force
+
+  sonarcloud-analysis:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential unixodbc-dev
+
+      - name: Install Java 17
+        run: |
+          sudo apt update
+          sudo apt install -y openjdk-17-jdk
+          java -version
+
+      - name: Download and extract SonarScanner
+        run: |
+          curl -L "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-6.2.1.4610-linux-x64.zip" -o sonar-scanner-linux.zip
+          unzip sonar-scanner-linux.zip -d /opt
+          sudo ln -s /opt/sonar-scanner-6.2.1.4610-linux-x64/bin/sonar-scanner /usr/local/bin/sonar-scanner
+          sonar-scanner --version
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          pip install -r proyecto/requirements.txt
+
+      - name: Run tests with coverage
+        run: |
+          cd proyecto
+          pytest --cov=. --cov-report=xml:report_coverage/coverage.xml  
+          pytest --cov=. --cov-report=html:report_coverage/htmlcov
+
+      - name: Run SonarCloud Analysis
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          cd proyecto
+          sonar-scanner -Dsonar.projectKey=jaimeflores_flaskapp \
+            -Dsonar.organization=jaimeflores \
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.python.coverage.reportPaths=proyecto/report_coverage/coverage.xml \
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+      - name: Create Reports folder
+        run: |
+          mkdir -p proyecto/Reportes
+          mv proyecto/report_coverage/htmlcov/ proyecto/Reportes/
+
+      - name: Check if htmlcov exists
+        run: |
+          if [ -d "proyecto/Reportes/htmlcov" ]; then
+            echo "htmlcov directory exists."
+          else
+            echo "htmlcov directory does not exist. Exiting."
+            exit 1
+          fi
+
+      - name: Remove .gitignore from htmlcov
+        run: |
+          if [ -f "proyecto/Reportes/htmlcov/.gitignore" ]; then
+            rm -f proyecto/Reportes/htmlcov/.gitignore
+          fi
+
+      - name: Configure Git for GitHub Pages
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit local changes
+        run: |
+          git add . 
+          git commit -m "Saving analysis reports" || echo "No changes to commit"
+          
+      - name: Publish report to GitHub Pages
+        run: |
+          git fetch origin gh-pages
+          git checkout gh-pages
+          cp -r proyecto/Reportes/htmlcov ./
+          git add htmlcov
+          git commit -m "Publishing SonarCloud coverage report and htmlcov"
+          git push origin gh-pages
+
+  semgrep-analysis:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r proyecto/requirements.txt
+
+      - name: Set up Semgrep
+        run: docker pull semgrep/semgrep
+
+      - name: Run Semgrep (SARIF Output)
+        run: docker run --rm -v $(pwd):/src semgrep/semgrep semgrep scan --config="p/default" --sarif --output=report.sarif --metrics=off
+
+      - name: Upload SARIF file to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: report.sarif
+
+      - name: Run Semgrep (JSON Output)
+        run: docker run --rm -v $(pwd):/src semgrep/semgrep semgrep scan --config="p/default" --json --output semgrep.json --metrics=off
+
+      - name: Install prospector-html
+        run: python -m pip install prospector2html
+
+      - name: Convert Semgrep results to HTML
+        run: prospector-html --input semgrep.json --output semgrep-report.html --filter semgrep || true
+
+      - name: Move report to Reportes folder
+        run: |
+          mkdir -p Reportes
+          mv semgrep-report.html Reportes/
+
+      - name: Publish report to GitHub Pages
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin gh-pages
+          git checkout gh-pages
+          cp Reportes/semgrep-report.html reporte-semgrep.html
+          git add reporte-semgrep.html
+          git commit -m "Publishing Semgrep report as reporte-semgrep.html"
+          git push origin gh-pages
+
+  generate-unit-test-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.8'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r proyecto/requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run tests and generate HTML coverage report
+        run: |
+          cd proyecto  # Cambia al directorio del proyecto si es necesario
+          pytest --cov=. tests/ --cov-report=html:report-unit
+
+      - name: Mover directorio de reporte a Reportes
+        run: |
+          mkdir -p ../Reportes
+          mv proyecto/report-unit ../Reportes/
+
+      - name: Configurar Git para publicar en GitHub Pages
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare gh-pages branch and deploy report
+        run: |
+          # Obtiene la última versión de la rama gh-pages
+          git fetch origin gh-pages || echo "No previous gh-pages branch"
+
+          # Si la rama gh-pages existe, realiza un pull para obtener los cambios remotos
+          git checkout gh-pages || git checkout -b gh-pages
+          git pull origin gh-pages || echo "No changes to pull from gh-pages"
+
+          # Mueve el directorio htmlcov a la raíz de la rama gh-pages
+          cp -r ../Reportes/* .
+
+          # Añadir el directorio htmlcov a Git
+          git add .
+
+          # Realiza commit si hay cambios
+          git commit -m "Publicando reporte de cobertura de pruebas unitarias" || echo "No hay cambios para commitear"
+
+          # Empuja los cambios a la rama gh-pages
+          git push origin gh-pages
+
+  generate-bdd-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r proyecto/requirements.txt
+
+      - name: Install Allure Behave formatter
+        run: |
+          pip install allure-behave
+
+      - name: Install Allure Commandline
+        run: |
+          npm install -g allure-commandline --save-dev  # Instalar Allure Commandline
+
+      - name: List project files for debugging
+        run: |
+          cd proyecto/Tests_BDD
+          ls -R  # Verifica la estructura de directorios y archivos
+
+      - name: Generate Allure results
+        run: |
+          cd proyecto/Tests_BDD
+          behave -f allure_behave.formatter:AllureFormatter -o allure-results ./Features
+
+      - name: Generate HTML report
+        run: |
+          cd proyecto/Tests_BDD
+          allure generate allure-results --clean -o allure-report
+
+      - name: Create Reports folder
+        run: |
+          mkdir -p ../Reportes  # Crear el directorio si no existe
+          mv proyecto/Tests_BDD/allure-report/ ../Reportes/  # Mover el reporte HTML generado
+
+      - name: Set up Git for deployment
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Deploy Reports folder to GitHub Pages
+        run: |
+          git fetch origin gh-pages || echo "No previous gh-pages branch"
+          git checkout gh-pages || git checkout -b gh-pages
+          git pull origin gh-pages || echo "No changes to pull from gh-pages"
+          cp -r ../Reportes/* .  # Copia el contenido de la carpeta Reportes
+          git add .  # Agrega todos los archivos copiados
+          git commit -m "Deploy Allure report to gh-pages" || echo "No changes to commit"  # Manejo de caso si no hay cambios
+          git push origin gh-pages  # Publica los cambios en la rama gh-pages
+
+  mutant-testing:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install mutmut==2.0.0
+          pip install pytest
+          pip install -r proyecto/requirements.txt
+
+      - name: Run mutmut
+        continue-on-error: true
+        run: |
+          cd proyecto
+          mutmut run --paths-to-mutate tests/
+
+      - name: Reporte mutmut
+        continue-on-error: true
+        run: |
+          cd proyecto
+          mutmut html
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./proyecto/html
+          destination_dir: reporte-mutantes
+          user_name: 'github-actions[bot]'
+          user_email: 'github-actions[bot]@users.noreply.github.com'
+          commit_message: 'Update Mutant Testing Report'
+
+  playwright-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          cd proyecto
+          npm install
+          npx playwright install
+
+      - name: Move Playwright report to Reportes
+        run: |
+          mkdir -p ../Reportes
+          mv proyecto/playwright-report ../Reportes/
+
+      - name: Set up Git for deployment
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Deploy Playwright report to GitHub Pages
+        run: |
+          git fetch origin gh-pages
+          git checkout gh-pages
+          git pull origin gh-pages
+          cp -r ../Reportes/* .
+          git add .
+          git commit -m "Deploy Playwright report to gh-pages"
+          git push origin gh-pages
