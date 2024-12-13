@@ -407,12 +407,23 @@ jobs:
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
 
-      - name: Deploy Playwright report to GitHub Pages
+      - name: Prepare gh-pages branch and deploy report
         run: |
-          git fetch origin gh-pages
-          git checkout gh-pages
-          git pull origin gh-pages
+          # Obtiene la última versión de la rama gh-pages
+          git fetch origin gh-pages || echo "No previous gh-pages branch"
+
+          # Si la rama gh-pages existe, realiza un pull para obtener los cambios remotos
+          git checkout gh-pages || git checkout -b gh-pages
+          git pull origin gh-pages || echo "No changes to pull from gh-pages"
+
+          # Mueve el directorio htmlcov a la raíz de la rama gh-pages
           cp -r ../Reportes/* .
+
+          # Añadir el directorio htmlcov a Git
           git add .
-          git commit -m "Deploy Playwright report to gh-pages"
+
+          # Verificar si hay cambios y realizar commit
+          git diff --cached --quiet || git commit -m "Deploy report to gh-pages" || echo "No changes to commit"
+
+          # Empuja los cambios a la rama gh-pages
           git push origin gh-pages
